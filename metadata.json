@@ -1,0 +1,5 @@
+{
+  "name": "Copy of Blinko Game",
+  "description": "A visually appealing and interactive Plinko-style gambling game. Players can drop a ball from the top of a pegged pyramid, watch it bounce down, and win multipliers based on the bin it lands in. The game features adjustable bet amounts and risk levels (Low, Medium, High) to cater to different play styles.",
+  "requestFramePermissions": []
+}
