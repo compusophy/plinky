@@ -5,31 +5,38 @@ import { sdk } from '@farcaster/miniapp-sdk';
 import PlinkoBoard from './components/PlinkoBoard';
 import HistoryTable from './components/HistoryTable';
 import { GameResult } from './types';
-import { MULTIPLIERS, ROWS } from './constants';
+import { MULTIPLIERS, ROWS, PHYSICS_CALIBRATION_COEFFICIENT, CALIBRATED_MULTIPLIERS } from './constants';
 
 type DevToolsTab = 'devtools' | 'balance' | 'history';
 
 const App: React.FC = () => {
   const [balance, setBalance] = useState<number>(1000);
-  const [multipliers, setMultipliers] = useState<number[]>(MULTIPLIERS);
+  // Use calibrated multipliers if available, otherwise use base multipliers
+  const [multipliers, setMultipliers] = useState<number[]>(
+    CALIBRATED_MULTIPLIERS.length > 0 ? CALIBRATED_MULTIPLIERS : MULTIPLIERS
+  );
   const [history, setHistory] = useState<GameResult[]>([]);
   const [playTrigger, setPlayTrigger] = useState(0);
-  const [isBallInPlay, setIsBallInPlay] = useState<boolean>(false);
   const [isDevToolsVisible, setIsDevToolsVisible] = useState(false);
   const [devToolsTab, setDevToolsTab] = useState<DevToolsTab>('devtools');
   const [lastPayout, setLastPayout] = useState<{ payout: number; key: number } | null>(null);
   const [simulationResult, setSimulationResult] = useState<string | null>(null);
   const [targetRTP, setTargetRTP] = useState(0.95);
   const [isCalculating, setIsCalculating] = useState(false);
+  const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [rowSpacing, setRowSpacing] = useState<number>(0);
   const [containerHeight, setContainerHeight] = useState<number>(0);
   
-  // Gravity calibration state
+  // Gravity calibration state - keep stable to maintain correct physics
   const [gravity, setGravity] = useState<number>(0.1);
-  const binDistributionRef = useRef<number[]>([]);
-  const calibrationHistoryRef = useRef<number[]>([]);
+  const binDistributionRef = useRef<number[]>([]); // Track wins per bin (cumulative, never reset)
+  const totalLossesRef = useRef<number>(0); // Track losses (ball hits floor) (cumulative)
+  const calibrationHistoryRef = useRef<{ rtp: number; scaleFactor: number; games: number }[]>([]); // Track calibration history
+  const totalGamesPlayedRef = useRef<number>(0); // Track all games played (cumulative, never reset)
+  const totalPayoutRef = useRef<number>(0); // Track total payout across all games (cumulative)
+  const lastCalibrationGamesRef = useRef<number>(0); // Track games since last calibration
 
   const BET_AMOUNT = 1;
 
@@ -90,10 +97,212 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // Initialize bin distribution tracking
+  // Initialize bin distribution tracking (only on mount, never reset)
   useEffect(() => {
-    binDistributionRef.current = new Array(multipliers.length).fill(0);
+    if (binDistributionRef.current.length === 0) {
+      binDistributionRef.current = new Array(multipliers.length).fill(0);
+      totalLossesRef.current = 0;
+      lastCalibrationGamesRef.current = 0;
+    } else if (binDistributionRef.current.length !== multipliers.length) {
+      // If multiplier count changed, resize but preserve existing data
+      const oldLength = binDistributionRef.current.length;
+      binDistributionRef.current = [...binDistributionRef.current, ...new Array(multipliers.length - oldLength).fill(0)];
+    }
   }, [multipliers.length]);
+
+  // Auto-calibrate multipliers on mount ONLY if no calibrated multipliers exist
+  // If CALIBRATED_MULTIPLIERS is set, use those directly (they're already calibrated)
+  useEffect(() => {
+    // If we already have calibrated multipliers, use them and skip auto-calibration
+    if (CALIBRATED_MULTIPLIERS.length > 0) {
+      console.log('Using pre-calibrated multipliers:', CALIBRATED_MULTIPLIERS);
+      return;
+    }
+
+    // Otherwise, apply initial calibration from base multipliers
+    const baseEV = calculateExpectedValue(MULTIPLIERS);
+    if (baseEV > 0) {
+      // Step 1: Scale to target RTP (95%)
+      const targetRTPFactor = 0.95 / baseEV;
+      // Step 2: Apply physics calibration coefficient to account for Matter.js physics differences
+      const finalScalingFactor = targetRTPFactor * PHYSICS_CALIBRATION_COEFFICIENT;
+      const newMultipliers = MULTIPLIERS.map(m => parseFloat((m * finalScalingFactor).toPrecision(3)));
+      setMultipliers(newMultipliers);
+      console.log('Auto-calibrated multipliers (dev mode):', {
+        baseEV: baseEV.toFixed(4),
+        targetRTPFactor: targetRTPFactor.toFixed(4),
+        physicsCoeff: PHYSICS_CALIBRATION_COEFFICIENT,
+        finalScalingFactor: finalScalingFactor.toFixed(4),
+        multipliers: newMultipliers
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
+
+  // Calculate multipliers based on actual game distribution to achieve target RTP
+  // Uses PID-like control with cumulative tracking and gradual adjustments
+  const calibrateFromActualData = useCallback(() => {
+    const totalGames = totalGamesPlayedRef.current;
+    const gamesSinceLastCalibration = totalGames - lastCalibrationGamesRef.current;
+    
+    if (gamesSinceLastCalibration < 50) {
+      setNotification({ 
+        message: `Need at least 50 new games since last calibration. You have ${gamesSinceLastCalibration} new games.`, 
+        type: 'error' 
+      });
+      setTimeout(() => setNotification(null), 5000);
+      return;
+    }
+
+    // Calculate actual probability distribution from ALL cumulative games
+    const actualProbs: number[] = [];
+    const totalWins = binDistributionRef.current.reduce((a, b) => a + b, 0);
+    
+    if (totalGames === 0 || totalWins === 0) {
+      setNotification({ 
+        message: 'Cannot calibrate: no wins recorded.', 
+        type: 'error' 
+      });
+      setTimeout(() => setNotification(null), 5000);
+      return;
+    }
+    
+    for (let i = 0; i < multipliers.length; i++) {
+      actualProbs.push(binDistributionRef.current[i] / totalGames);
+    }
+
+    // Calculate current RTP with actual distribution and current multipliers
+    let currentRTP = 0;
+    for (let i = 0; i < multipliers.length; i++) {
+      currentRTP += actualProbs[i] * multipliers[i];
+    }
+
+    // Calculate error (difference from target)
+    const error = targetRTP - currentRTP;
+    const errorPercent = (error / targetRTP) * 100;
+
+    // PID-like control: Use proportional term with learning rate to prevent oscillation
+    // More aggressive learning rate when far from target, conservative when close
+    // Formula: learningRate = min(0.8, max(0.2, errorPercent / 50))
+    // This means: 20% min, up to 80% max, scales with error
+    // At 11% error: ~22% learning rate (was 11%)
+    // At 50% error: 80% learning rate
+    // At 5% error: 20% learning rate (conservative)
+    const learningRate = Math.min(0.8, Math.max(0.2, Math.abs(errorPercent) / 50));
+    
+    // Calculate desired scale factor
+    const desiredScaleFactor = targetRTP / currentRTP;
+    
+    // Apply learning rate: only adjust by a fraction to prevent oscillation
+    // Instead of: newMultiplier = oldMultiplier * desiredScaleFactor
+    // We do: newMultiplier = oldMultiplier * (1 + learningRate * (desiredScaleFactor - 1))
+    // This makes gradual adjustments
+    const adjustmentFactor = 1 + learningRate * (desiredScaleFactor - 1);
+    
+    // Apply gradual adjustment to multipliers
+    const calibratedMultipliers = multipliers.map(m => parseFloat((m * adjustmentFactor).toPrecision(3)));
+    setMultipliers(calibratedMultipliers);
+
+    // Record calibration history (keep last 10)
+    calibrationHistoryRef.current.push({
+      rtp: currentRTP,
+      scaleFactor: adjustmentFactor,
+      games: gamesSinceLastCalibration
+    });
+    if (calibrationHistoryRef.current.length > 10) {
+      calibrationHistoryRef.current.shift();
+    }
+
+    // Update last calibration point
+    lastCalibrationGamesRef.current = totalGames;
+
+    // Calculate expected new RTP (approximate)
+    const expectedNewRTP = currentRTP * adjustmentFactor;
+
+    setNotification({ 
+      message: `Calibrated (${gamesSinceLastCalibration} new games, ${totalGames} total). Current RTP: ${(currentRTP * 100).toFixed(2)}% → Expected: ${(expectedNewRTP * 100).toFixed(2)}% (Target: ${(targetRTP * 100).toFixed(2)}%). Adjustment: ${(adjustmentFactor * 100).toFixed(2)}% (learning rate: ${(learningRate * 100).toFixed(1)}%)`, 
+      type: 'success' 
+    });
+    setTimeout(() => setNotification(null), 8000);
+  }, [multipliers, targetRTP]);
+
+  // Force calibration: apply full adjustment instead of gradual (for when close but not quite there)
+  const forceCalibrate = useCallback(() => {
+    const totalGames = totalGamesPlayedRef.current;
+    if (totalGames < 50) {
+      setNotification({ 
+        message: `Need at least 50 games. You have ${totalGames} games.`, 
+        type: 'error' 
+      });
+      setTimeout(() => setNotification(null), 5000);
+      return;
+    }
+
+    const actualProbs: number[] = [];
+    const totalWins = binDistributionRef.current.reduce((a, b) => a + b, 0);
+    
+    if (totalGames === 0 || totalWins === 0) {
+      setNotification({ 
+        message: 'Cannot calibrate: no wins recorded.', 
+        type: 'error' 
+      });
+      setTimeout(() => setNotification(null), 5000);
+      return;
+    }
+    
+    for (let i = 0; i < multipliers.length; i++) {
+      actualProbs.push(binDistributionRef.current[i] / totalGames);
+    }
+
+    let currentRTP = 0;
+    for (let i = 0; i < multipliers.length; i++) {
+      currentRTP += actualProbs[i] * multipliers[i];
+    }
+
+    if (currentRTP === 0) {
+      setNotification({ 
+        message: 'Cannot calibrate: no wins recorded.', 
+        type: 'error' 
+      });
+      setTimeout(() => setNotification(null), 5000);
+      return;
+    }
+
+    // Force full adjustment to target
+    const scaleFactor = targetRTP / currentRTP;
+    const calibratedMultipliers = multipliers.map(m => parseFloat((m * scaleFactor).toPrecision(3)));
+    setMultipliers(calibratedMultipliers);
+
+    lastCalibrationGamesRef.current = totalGames;
+
+    setNotification({ 
+      message: `Force calibrated (${totalGames} games). RTP: ${(currentRTP * 100).toFixed(2)}% → Target: ${(targetRTP * 100).toFixed(2)}%. Scale: ${(scaleFactor * 100).toFixed(2)}%`, 
+      type: 'success' 
+    });
+    setTimeout(() => setNotification(null), 8000);
+  }, [multipliers, targetRTP]);
+
+  // Export calibrated multipliers to constants.ts (dev tool)
+  const exportCalibratedMultipliers = useCallback(() => {
+    const multiplierString = multipliers.map(m => m.toFixed(3)).join(', ');
+    const codeToCopy = `export const CALIBRATED_MULTIPLIERS: number[] = [${multiplierString}];`;
+    
+    // Copy to clipboard
+    navigator.clipboard.writeText(codeToCopy).then(() => {
+      setNotification({
+        message: `Calibrated multipliers copied to clipboard! Paste into constants.ts:\n\n${codeToCopy}\n\nAfter saving, reload the page to use pre-calibrated multipliers.`,
+        type: 'success'
+      });
+      setTimeout(() => setNotification(null), 12000);
+    }).catch(() => {
+      // Fallback: show in alert-style notification
+      setNotification({
+        message: `Copy this to constants.ts:\n\n${codeToCopy}`,
+        type: 'info'
+      });
+      setTimeout(() => setNotification(null), 15000);
+    });
+  }, [multipliers]);
 
   // Calculate perfect container height based on width for even row divisions
   // Container = header (vSpacing) + main + footer (vSpacing)
@@ -134,75 +343,24 @@ const App: React.FC = () => {
   }, [multipliers]);
 
   const handlePlay = useCallback(() => {
-    if (balance < BET_AMOUNT || isBallInPlay) {
+    if (balance < BET_AMOUNT) {
       return;
     }
-    setIsBallInPlay(true);
     setLastPayout(null); // Clear payout display when starting new play
     setBalance(prev => prev - BET_AMOUNT);
     setPlayTrigger(prev => prev + 1);
-  }, [balance, isBallInPlay]);
+  }, [balance]);
 
   // Calculate expected distribution (binomial)
   const getExpectedDistribution = useCallback((): number[] => {
     return calculateBinProbabilities(multipliers.length);
   }, [multipliers.length, calculateBinProbabilities]);
 
-  // PID-like gravity calibration
+  // Disabled auto-calibration - gravity changes affect physics and break RTP
+  // Multipliers are auto-calibrated on mount using PHYSICS_CALIBRATION_COEFFICIENT
   const calibrateGravity = useCallback(() => {
-    const totalGames = binDistributionRef.current.reduce((a, b) => a + b, 0);
-    if (totalGames < 20) return; // Need at least 20 games for calibration
-    
-    const expectedDist = getExpectedDistribution();
-    const actualDist = binDistributionRef.current.map(count => count / totalGames);
-    
-    // Calculate error: how much the distribution is skewed toward center
-    // If balls cluster in center, gravity is too low
-    const centerBins = [3, 4]; // Indices of center bins (0.58x)
-    const edgeBins = [0, 1, 6, 7]; // Indices of edge bins
-    
-    let centerError = 0;
-    let edgeError = 0;
-    
-    centerBins.forEach(i => {
-      centerError += actualDist[i] - expectedDist[i];
-    });
-    
-    edgeBins.forEach(i => {
-      edgeError += expectedDist[i] - actualDist[i];
-    });
-    
-    // If too many balls in center, increase gravity
-    // If too many balls at edges, decrease gravity
-    const error = centerError - edgeError;
-    
-    // PID controller parameters
-    const Kp = 0.5; // Proportional gain
-    const Ki = 0.1; // Integral gain
-    const Kd = 0.05; // Derivative gain
-    
-    // Store error history for integral and derivative terms
-    calibrationHistoryRef.current.push(error);
-    if (calibrationHistoryRef.current.length > 10) {
-      calibrationHistoryRef.current.shift();
-    }
-    
-    const integral = calibrationHistoryRef.current.reduce((a, b) => a + b, 0);
-    const derivative = calibrationHistoryRef.current.length > 1 
-      ? error - calibrationHistoryRef.current[calibrationHistoryRef.current.length - 2]
-      : 0;
-    
-    const adjustment = Kp * error + Ki * integral + Kd * derivative;
-    
-    // Update gravity (clamp between 0.01 and 0.5)
-    const newGravity = Math.max(0.01, Math.min(0.5, gravity + adjustment * 0.01));
-    setGravity(newGravity);
-    
-    // Reset distribution every 50 games for continuous calibration
-    if (totalGames >= 50) {
-      binDistributionRef.current = new Array(multipliers.length).fill(0);
-    }
-  }, [gravity, multipliers.length, getExpectedDistribution]);
+    // Auto-calibration disabled - keeping gravity stable at 0.1
+  }, []);
 
   const handleGameEnd = useCallback((finalBinIndex: number) => {
     const isLoss = finalBinIndex === -1;
@@ -210,11 +368,16 @@ const App: React.FC = () => {
     const payout = BET_AMOUNT * multiplier;
     const profit = payout - BET_AMOUNT;
 
-    // Track distribution for gravity calibration
-    if (!isLoss && finalBinIndex >= 0 && finalBinIndex < multipliers.length) {
+    // Track distribution for calibration
+    if (isLoss) {
+      totalLossesRef.current++;
+    } else if (finalBinIndex >= 0 && finalBinIndex < multipliers.length) {
       binDistributionRef.current[finalBinIndex]++;
-      calibrateGravity();
     }
+
+    // Track all games and total payout for accurate RTP calculation
+    totalGamesPlayedRef.current++;
+    totalPayoutRef.current += payout;
 
     setBalance(prev => prev + payout);
     const newResult: GameResult = {
@@ -223,9 +386,9 @@ const App: React.FC = () => {
       payout,
       profit,
     };
-    setHistory(prev => [newResult, ...prev.slice(0, 14)]);
+    // Store all games in history (no limit)
+    setHistory(prev => [newResult, ...prev]);
     setLastPayout({ payout, key: Date.now() });
-    setIsBallInPlay(false); // Re-enable button when game ends
   }, [multipliers, calibrateGravity]);
   
   const runSimulation = (simMultipliers: number[], runs: number) => {
@@ -242,41 +405,116 @@ const App: React.FC = () => {
     return totalPayout / runs;
   }
 
-  const handleSimulate = useCallback(() => {
-    // Use deterministic calculation for exact EV
-    const ev = calculateExpectedValue(multipliers);
-    const houseEdge = (1 - ev) * 100;
-    const probabilities = calculateBinProbabilities(multipliers.length);
+  const handleSimulate = useCallback(async () => {
+    setIsCalculating(true);
     
-    let probText = 'Bin Probabilities:\n';
-    probabilities.forEach((prob, i) => {
-      probText += `Bin ${i}: ${(prob * 100).toFixed(2)}% (${multipliers[i]}x)\n`;
+    // Show actual game history RTP if available - use all games played, not just history array
+    let actualHistoryRTP: number | null = null;
+    const totalGamesPlayed = totalGamesPlayedRef.current;
+    if (totalGamesPlayed > 0) {
+      actualHistoryRTP = totalPayoutRef.current / totalGamesPlayed;
+    }
+    
+    setSimulationResult('Running simulations...\nThis may take a moment...');
+    
+    // Run simulations - track both bin indices and payouts
+    const binIndices: number[] = [];
+    const simulationPayouts: number[] = [];
+    const binCount = multipliers.length;
+    
+    // Simulate 200 games for better accuracy
+    for (let i = 0; i < 200; i++) {
+      let position = (binCount - 1) / 2;
+      for (let j = 0; j < ROWS; j++) {
+        position += Math.random() < 0.5 ? -0.5 : 0.5;
+      }
+      const finalBinIndex = Math.max(0, Math.min(binCount - 1, Math.round(position)));
+      binIndices.push(finalBinIndex);
+      simulationPayouts.push(multipliers[finalBinIndex]);
+    }
+    
+    // Calculate RTP from simulation results
+    const totalPayout = simulationPayouts.reduce((sum, payout) => sum + payout, 0);
+    const simulationRTP = totalPayout / 200;
+    const houseEdge = (1 - simulationRTP) * 100;
+    
+    // Count bin distribution
+    const binCounts = new Array(binCount).fill(0);
+    binIndices.forEach(binIdx => {
+      binCounts[binIdx]++;
     });
     
-    const resultText = `Expected Value (EV): ${ev.toFixed(4)}\nReturn to Player (RTP): ${(ev * 100).toFixed(2)}%\nHouse Edge: ${houseEdge.toFixed(2)}%\n\n${probText}`;
+    // Compare with theoretical
+    const theoreticalEV = calculateExpectedValue(multipliers);
+    const theoreticalRTP = theoreticalEV;
+    
+    let resultText = `=== RTP ANALYSIS ===\n\n`;
+    
+    if (actualHistoryRTP !== null) {
+      resultText += `🎯 ACTUAL GAME RTP (${totalGamesPlayed} games): ${(actualHistoryRTP * 100).toFixed(2)}%\n`;
+      resultText += `   This is REAL data from your games!\n\n`;
+    }
+    
+    resultText += `📊 Simulation RTP (200 games): ${(simulationRTP * 100).toFixed(2)}%\n`;
+    resultText += `📐 Theoretical RTP (math): ${(theoreticalRTP * 100).toFixed(2)}%\n`;
+    resultText += `📉 Difference: ${((simulationRTP - theoreticalRTP) * 100).toFixed(2)}%\n`;
+    resultText += `💰 House Edge: ${houseEdge.toFixed(2)}%\n\n`;
+    
+    if (actualHistoryRTP !== null) {
+      const diffFromActual = ((simulationRTP - actualHistoryRTP) * 100);
+      resultText += `⚠️  Simulation vs Actual: ${diffFromActual > 0 ? '+' : ''}${diffFromActual.toFixed(2)}%\n`;
+      resultText += `   (Simulation may not match physics exactly)\n\n`;
+    }
+    
+    resultText += `Bin Distribution (from simulation):\n`;
+    binCounts.forEach((count, i) => {
+      const percentage = (count / 200) * 100;
+      resultText += `Bin ${i}: ${count} games (${percentage.toFixed(1)}%) → ${multipliers[i]}x\n`;
+    });
+    
+    if (totalGamesPlayed >= 50 && actualHistoryRTP !== null) {
+      // Calculate actual bin probabilities
+      const actualProbs: number[] = [];
+      const totalWins = binDistributionRef.current.reduce((a, b) => a + b, 0);
+      for (let i = 0; i < multipliers.length; i++) {
+        actualProbs.push(binDistributionRef.current[i] / totalGamesPlayed);
+      }
+      
+      // Calculate what RTP would be with current multipliers and actual distribution
+      let actualRTPWithCurrentMultipliers = 0;
+      for (let i = 0; i < multipliers.length; i++) {
+        actualRTPWithCurrentMultipliers += actualProbs[i] * multipliers[i];
+      }
+      
+      const error = targetRTP - actualRTPWithCurrentMultipliers;
+      const errorPercent = (error / targetRTP) * 100;
+      
+      resultText += `\n\n🔧 CALIBRATION INFO (Cumulative):\n`;
+      resultText += `   Total Games: ${totalGamesPlayed} (${totalGamesPlayed - lastCalibrationGamesRef.current} since last calibration)\n`;
+      resultText += `   Current RTP (actual games): ${(actualHistoryRTP * 100).toFixed(2)}%\n`;
+      resultText += `   Current RTP (with actual distribution): ${(actualRTPWithCurrentMultipliers * 100).toFixed(2)}%\n`;
+      resultText += `   Target RTP: ${(targetRTP * 100).toFixed(2)}%\n`;
+      resultText += `   Error: ${errorPercent > 0 ? '+' : ''}${errorPercent.toFixed(2)}%\n\n`;
+      
+      if (calibrationHistoryRef.current.length > 0) {
+        resultText += `   Calibration History (last ${calibrationHistoryRef.current.length}):\n`;
+        calibrationHistoryRef.current.slice(-5).forEach((cal, idx) => {
+          resultText += `     ${idx + 1}. RTP: ${(cal.rtp * 100).toFixed(2)}%, Scale: ${(cal.scaleFactor * 100).toFixed(2)}%, Games: ${cal.games}\n`;
+        });
+      }
+      
+      resultText += `\n   Actual Bin Distribution (cumulative):\n`;
+      actualProbs.forEach((prob, i) => {
+        resultText += `     Bin ${i}: ${(prob * 100).toFixed(1)}% (${binDistributionRef.current[i]} games)\n`;
+      });
+    } else if (totalGamesPlayed < 50) {
+      resultText += `\n💡 Tip: Play 50+ games to see calibration recommendations.`;
+    }
+    
     setSimulationResult(resultText);
-  }, [multipliers, calculateExpectedValue, calculateBinProbabilities]);
+    setIsCalculating(false);
+  }, [multipliers, calculateExpectedValue, targetRTP]);
   
-  const handleRecalculateMultipliers = useCallback(() => {
-    setIsCalculating(true);
-    setTimeout(() => {
-        const baseEV = calculateExpectedValue(multipliers);
-        if (baseEV === 0) {
-          setSimulationResult('Error: Cannot calculate RTP. Check probability calculation.');
-          setIsCalculating(false);
-          return;
-        }
-        const scalingFactor = targetRTP / baseEV;
-        const newMultipliers = multipliers.map(m => parseFloat((m * scalingFactor).toPrecision(3)));
-        setMultipliers(newMultipliers);
-        
-        const finalEV = calculateExpectedValue(newMultipliers);
-        const houseEdge = (1 - finalEV) * 100;
-        const resultText = `Target RTP: ${(targetRTP * 100).toFixed(2)}%\n---\nActual RTP: ${(finalEV * 100).toFixed(2)}%\nHouse Edge: ${houseEdge.toFixed(2)}%\n\nNew Multipliers:\n${newMultipliers.map((m, i) => `Bin ${i}: ${m.toFixed(2)}x`).join('\n')}`;
-        setSimulationResult(resultText);
-        setIsCalculating(false);
-    }, 50);
-  }, [multipliers, targetRTP, calculateExpectedValue]);
 
 
   return (
@@ -297,6 +535,30 @@ const App: React.FC = () => {
               </span>
             )}
         </div>
+
+        {notification && (
+          <div className="absolute top-20 left-1/2 transform -translate-x-1/2 z-50 pointer-events-auto max-w-md w-full px-4">
+            <div 
+              className={`p-4 rounded-lg shadow-lg border-2 ${
+                notification.type === 'success' 
+                  ? 'bg-green-900/95 border-green-600 text-green-100' 
+                  : notification.type === 'error'
+                  ? 'bg-red-900/95 border-red-600 text-red-100'
+                  : 'bg-blue-900/95 border-blue-600 text-blue-100'
+              }`}
+            >
+              <div className="flex items-start justify-between">
+                <p className="text-sm font-medium flex-1">{notification.message}</p>
+                <button 
+                  onClick={() => setNotification(null)}
+                  className="ml-4 text-lg leading-none opacity-70 hover:opacity-100"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         
         <header 
           className="absolute top-0 left-0 right-0 px-4 flex justify-end items-center z-20"
@@ -322,19 +584,19 @@ const App: React.FC = () => {
         >
             <button
                 onClick={handlePlay}
-                disabled={balance < BET_AMOUNT || isBallInPlay}
+                disabled={balance < BET_AMOUNT}
                 className="w-full text-gray-900 font-bold py-3 rounded-md text-lg uppercase transition-all duration-300 disabled:from-gray-600 disabled:to-gray-700 disabled:text-gray-400 disabled:shadow-none"
                 style={{
-                    background: (balance < BET_AMOUNT || isBallInPlay) ? 'linear-gradient(to right, #4b5563, #374151)' : 'linear-gradient(to right, #168118, #157811)',
-                    boxShadow: (balance < BET_AMOUNT || isBallInPlay) ? 'none' : '0 0 5px #168118, 0 0 10px #168118'
+                    background: balance < BET_AMOUNT ? 'linear-gradient(to right, #4b5563, #374151)' : 'linear-gradient(to right, #168118, #157811)',
+                    boxShadow: balance < BET_AMOUNT ? 'none' : '0 0 5px #168118, 0 0 10px #168118'
                 }}
                 onMouseEnter={(e) => {
-                    if (balance >= BET_AMOUNT && !isBallInPlay) {
+                    if (balance >= BET_AMOUNT) {
                         e.currentTarget.style.background = 'linear-gradient(to right, #3e9c35, #168118)';
                     }
                 }}
                 onMouseLeave={(e) => {
-                    if (balance >= BET_AMOUNT && !isBallInPlay) {
+                    if (balance >= BET_AMOUNT) {
                         e.currentTarget.style.background = 'linear-gradient(to right, #168118, #157811)';
                     }
                 }}
@@ -344,18 +606,20 @@ const App: React.FC = () => {
         </footer>
 
         {isDevToolsVisible && (
-            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm z-40 flex items-center justify-center p-4" onClick={() => setIsDevToolsVisible(false)}>
-                <div className="w-full max-w-md bg-gray-800 rounded-lg shadow-xl" onClick={e => e.stopPropagation()}>
-                    <div className="p-4 flex justify-between items-center border-b border-gray-700">
+            <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-40 flex items-center justify-center p-2 sm:p-4 overflow-y-auto" onClick={() => setIsDevToolsVisible(false)}>
+                <div className="w-full max-w-md bg-gray-800 rounded-lg shadow-xl flex flex-col max-h-[95vh] my-auto" onClick={e => e.stopPropagation()}>
+                    <div className="p-4 flex justify-between items-center border-b border-gray-700 flex-shrink-0 sticky top-0 bg-gray-800 z-10">
                         <h3 className="text-lg font-semibold text-white">Dashboard</h3>
-                        <button onClick={() => setIsDevToolsVisible(false)} className="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+                        <button onClick={() => setIsDevToolsVisible(false)} className="text-gray-400 hover:text-white text-2xl leading-none font-bold">&times;</button>
                     </div>
                     
-                    <div className="flex border-b border-gray-700">
+                    <div className="flex border-b border-gray-700 flex-shrink-0 bg-gray-800">
                         <button onClick={() => setDevToolsTab('devtools')} className={`flex-1 py-2 text-sm font-semibold transition-colors ${devToolsTab === 'devtools' ? 'border-b-2' : 'text-gray-400 hover:text-gray-200'}`} style={devToolsTab === 'devtools' ? { color: '#3e9c35', borderColor: '#3e9c35' } : {}}>Dev Tools</button>
                         <button onClick={() => setDevToolsTab('balance')} className={`flex-1 py-2 text-sm font-semibold transition-colors ${devToolsTab === 'balance' ? 'border-b-2' : 'text-gray-400 hover:text-gray-200'}`} style={devToolsTab === 'balance' ? { color: '#3e9c35', borderColor: '#3e9c35' } : {}}>Balance</button>
                         <button onClick={() => setDevToolsTab('history')} className={`flex-1 py-2 text-sm font-semibold transition-colors ${devToolsTab === 'history' ? 'border-b-2' : 'text-gray-400 hover:text-gray-200'}`} style={devToolsTab === 'history' ? { color: '#3e9c35', borderColor: '#3e9c35' } : {}}>History</button>
                     </div>
+                    
+                    <div className="overflow-y-auto flex-1 min-h-0">
 
                     {devToolsTab === 'devtools' && (
                         <div className="p-4 space-y-4">
@@ -372,26 +636,55 @@ const App: React.FC = () => {
                                 </div>
                             </div>
                             <div className="bg-gray-900/70 p-3 rounded-md space-y-3">
-                                <h4 className="font-semibold text-base text-white">Game Economy</h4>
-                                <div>
-                                    <label htmlFor="rtp-slider" className="flex justify-between text-sm text-gray-300">
-                                      <span>Target RTP</span>
-                                      <span className="font-mono" style={{ color: '#3e9c35' }}>{(targetRTP * 100).toFixed(1)}%</span>
-                                    </label>
-                                    <input id="rtp-slider" type="range" min="0.90" max="1.00" step="0.005" value={targetRTP} onChange={(e) => setTargetRTP(parseFloat(e.target.value))}
-                                        className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer range-lg mt-1"
-                                        style={{ accentColor: '#168118' }} />
-                                </div>
-                                <button onClick={handleRecalculateMultipliers} disabled={isCalculating} className="w-full bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-500 transition-colors disabled:bg-gray-600">
-                                    {isCalculating ? 'Calculating...' : 'Calibrate Multipliers'}
+                                <h4 className="font-semibold text-base text-white">RTP Analysis</h4>
+                                <p className="text-xs text-gray-400">
+                                    Check actual RTP from game history and simulations. Multipliers are auto-calibrated on load.
+                                </p>
+                                <button onClick={handleSimulate} disabled={isCalculating} className="w-full text-white px-4 py-2 rounded transition-colors disabled:bg-gray-600 mb-2" style={{ backgroundColor: 'rgba(22, 129, 24, 0.8)' }} onMouseEnter={(e) => !isCalculating && (e.currentTarget.style.backgroundColor = 'rgba(22, 129, 24, 1)')} onMouseLeave={(e) => !isCalculating && (e.currentTarget.style.backgroundColor = 'rgba(22, 129, 24, 0.8)')}>
+                                    {isCalculating ? 'Calculating...' : 'Check Current RTP'}
                                 </button>
+                                <button 
+                                    onClick={calibrateFromActualData} 
+                                    disabled={(totalGamesPlayedRef.current - lastCalibrationGamesRef.current) < 50}
+                                    className="w-full text-white px-4 py-2 rounded transition-colors disabled:bg-gray-600 disabled:text-gray-400" 
+                                    style={{ backgroundColor: (totalGamesPlayedRef.current - lastCalibrationGamesRef.current) >= 50 ? 'rgba(139, 69, 19, 0.8)' : 'rgba(75, 75, 75, 0.8)' }} 
+                                    onMouseEnter={(e) => (totalGamesPlayedRef.current - lastCalibrationGamesRef.current) >= 50 && !isCalculating && (e.currentTarget.style.backgroundColor = 'rgba(139, 69, 19, 1)')} 
+                                    onMouseLeave={(e) => (totalGamesPlayedRef.current - lastCalibrationGamesRef.current) >= 50 && (e.currentTarget.style.backgroundColor = 'rgba(139, 69, 19, 0.8)')}
+                                >
+                                    {(totalGamesPlayedRef.current - lastCalibrationGamesRef.current) >= 50 
+                                      ? `Calibrate (${totalGamesPlayedRef.current - lastCalibrationGamesRef.current} new games, ${totalGamesPlayedRef.current} total)` 
+                                      : `Need 50+ new games (${totalGamesPlayedRef.current - lastCalibrationGamesRef.current} new, ${totalGamesPlayedRef.current} total)`}
+                                </button>
+                                <button 
+                                    onClick={forceCalibrate}
+                                    disabled={totalGamesPlayedRef.current < 50}
+                                    className="w-full text-white px-4 py-2 rounded transition-colors mt-2 disabled:bg-gray-600 disabled:text-gray-400" 
+                                    style={{ backgroundColor: totalGamesPlayedRef.current >= 50 ? 'rgba(220, 38, 38, 0.8)' : 'rgba(75, 75, 75, 0.8)' }} 
+                                    onMouseEnter={(e) => totalGamesPlayedRef.current >= 50 && (e.currentTarget.style.backgroundColor = 'rgba(220, 38, 38, 1)')} 
+                                    onMouseLeave={(e) => totalGamesPlayedRef.current >= 50 && (e.currentTarget.style.backgroundColor = 'rgba(220, 38, 38, 0.8)')}
+                                >
+                                    ⚡ Force Calibrate (Full Adjustment to 95%)
+                                </button>
+                                <button 
+                                    onClick={exportCalibratedMultipliers}
+                                    className="w-full text-white px-4 py-2 rounded transition-colors mt-2" 
+                                    style={{ backgroundColor: 'rgba(59, 130, 246, 0.8)' }} 
+                                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 1)')} 
+                                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.8)')}
+                                >
+                                    📋 Save Calibrated Multipliers to constants.ts
+                                </button>
+                                {CALIBRATED_MULTIPLIERS.length > 0 && (
+                                    <div className="mt-2 p-2 bg-green-900/30 border border-green-700/50 rounded text-xs text-green-200">
+                                        <strong>✅ Pre-calibrated:</strong> Using calibrated multipliers from constants.ts. Game is ready to ship!
+                                    </div>
+                                )}
+                                {totalGamesPlayedRef.current >= 50 && (
+                                    <div className="mt-2 p-2 bg-blue-900/30 border border-blue-700/50 rounded text-xs text-blue-200">
+                                        <strong>💡 Dev Calibration:</strong> Play 200+ games, calibrate until RTP is ~95%, then click "Save Calibrated Multipliers" to export. The game will ship pre-calibrated!
+                                    </div>
+                                )}
                             </div>
-                            <p className="text-xs text-gray-500">
-                                Simulate 100 runs with the current multipliers to see the approximate RTP.
-                            </p>
-                            <button onClick={handleSimulate} className="w-full text-white px-4 py-2 rounded transition-colors" style={{ backgroundColor: 'rgba(22, 129, 24, 0.8)' }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(22, 129, 24, 1)'} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(22, 129, 24, 0.8)'}>
-                                Check Current RTP
-                            </button>
                             {simulationResult && (
                                 <div className="bg-gray-900 p-3 rounded mt-2">
                                     <pre className="text-xs text-white whitespace-pre-wrap font-mono">{simulationResult}</pre>
@@ -406,8 +699,13 @@ const App: React.FC = () => {
                         </div>
                     )}
                     {devToolsTab === 'history' && (
-                        <HistoryTable history={history} />
+                        <HistoryTable 
+                            history={history} 
+                            totalGames={totalGamesPlayedRef.current}
+                            totalPayout={totalPayoutRef.current}
+                        />
                     )}
+                    </div>
                 </div>
             </div>
         )}

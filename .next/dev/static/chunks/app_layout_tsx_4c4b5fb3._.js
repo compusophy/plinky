@@ -7,7 +7,7 @@
   "static/chunks/518ff_zod_v3_a8163802._.js",
   "static/chunks/a2041_@noble_curves_esm_0f3722df._.js",
   "static/chunks/3c030_@solana_web3_js_lib_index_browser_esm_35b6c73b.js",
-  "static/chunks/node_modules__pnpm_7d96cd57._.js",
+  "static/chunks/node_modules__pnpm_693fe0be._.js",
   "static/chunks/_d3ed67ae._.js"
 ],
     source: "dynamic"

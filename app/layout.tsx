@@ -27,7 +27,7 @@ export async function generateMetadata(): Promise<Metadata> {
       title: 'Open App',
       action: {
         type: 'launch_miniapp',
-        name: 'Plinky',
+        name: 'PLINKY',
         url: origin,
         splashImageUrl: `${origin}/image.png`,
         splashBackgroundColor: '#ffffff',
@@ -36,9 +36,9 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 
   return {
-    title: 'Plinky',
+    title: 'PLINKY',
     openGraph: {
-      title: 'Plinky',
+      title: 'PLINKY',
       images: [`${origin}/image.png`],
     },
     other: {

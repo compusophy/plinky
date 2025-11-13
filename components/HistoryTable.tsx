@@ -3,11 +3,13 @@ import { GameResult } from '../types';
 
 interface HistoryTableProps {
   history: GameResult[];
+  totalGames: number;
+  totalPayout: number;
 }
 
-const HistoryTable: React.FC<HistoryTableProps> = ({ history }) => {
+const HistoryTable: React.FC<HistoryTableProps> = ({ history, totalGames, totalPayout }) => {
   const stats = useMemo(() => {
-    if (history.length === 0) {
+    if (totalGames === 0) {
       return {
         totalGames: 0,
         totalPayout: 0,
@@ -18,10 +20,8 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history }) => {
       };
     }
 
-    const totalGames = history.length;
-    const totalPayout = history.reduce((sum, result) => sum + result.payout, 0);
     const totalBets = totalGames; // Each game costs 1
-    const totalProfit = history.reduce((sum, result) => sum + result.profit, 0);
+    const totalProfit = totalPayout - totalBets; // Total payout - total bets
     const actualEV = totalPayout / totalGames; // Average payout per game
     const actualRTP = totalPayout / totalBets; // Return to player percentage
 
@@ -33,11 +33,11 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history }) => {
       actualRTP,
       totalProfit,
     };
-  }, [history]);
+  }, [totalGames, totalPayout]);
 
   return (
     <div className="p-4 space-y-4">
-      {history.length > 0 && (
+      {totalGames > 0 && (
         <div className="bg-gray-900/70 p-3 rounded-md space-y-2">
           <h4 className="font-semibold text-base text-white mb-3">Actual Statistics</h4>
           <div className="space-y-2 text-sm">

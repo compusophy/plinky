@@ -31,13 +31,14 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
   const engineRef = useRef<Matter.Engine | undefined>(undefined);
   const runnerRef = useRef<Matter.Runner | undefined>(undefined);
   const lastPlayTrigger = useRef(playTrigger);
-  const settledBallRef = useRef<Matter.Body | null>(null);
+  const settledBallsRef = useRef<Set<Matter.Body>>(new Set()); // Track multiple settled balls
   const initialBallRef = useRef<Matter.Body | null>(null);
   
   const [balls, setBalls] = useState<Record<string, { x: number; y: number; angle: number }>>({});
   const [winningBin, setWinningBin] = useState<number | null>(null);
   const [boardElements, setBoardElements] = useState<BoardElements | null>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const settledBallIdsRef = useRef<Set<number>>(new Set()); // Track IDs of settled balls to hide them
 
   useEffect(() => {
     if (!sceneRef.current) return;
@@ -98,7 +99,7 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
       for (let col = 0; col < pegsInRow; col++) {
         const x = startX + col * hSpacing;
         const peg = Matter.Bodies.circle(x, y, pegRadius, { 
-            isStatic: true, label: 'peg', restitution: 0.5, friction: 0.05 
+            isStatic: true, label: 'peg', restitution: 0.8, friction: 0.01 
         });
         staticBodies.push(peg);
         pegElements.push(<div key={`p-${row}-${col}`} className="absolute rounded-full shadow-lg" style={{ left: x, top: y, width: pegRadius * 2, height: pegRadius * 2, transform: 'translate(-50%, -50%)', background: 'radial-gradient(circle at 30% 30%, #c1c1c1, #777)' }} />);
@@ -114,7 +115,7 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
 
     for (let i = 0; i < binCount + 1; i++) {
         const x = i * hSpacing;
-        const pegPart = Matter.Bodies.circle(x, binDividerTopY, pegRadius, { isStatic: true, restitution: 0.5, friction: 0.05 });
+        const pegPart = Matter.Bodies.circle(x, binDividerTopY, pegRadius, { isStatic: true, restitution: 0.8, friction: 0.01 });
         const wallPart = Matter.Bodies.rectangle(x, binDividerTopY + binWallHeight / 2, pegRadius, binWallHeight, { isStatic: true });
         const dividerBody = Matter.Body.create({ parts: [pegPart, wallPart], isStatic: true, label: 'divider' });
         staticBodies.push(dividerBody);
@@ -192,7 +193,17 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
   }, [boardElements, winningBin, multipliers]);
 
   useEffect(() => {
-    const engine = Matter.Engine.create({ gravity: { y: gravity } });
+    // Scale gravity based on screen dimensions to maintain consistent physics
+    // Gravity needs to scale with screen size because distances scale with screen size
+    // Use a reference width (e.g., 400px) to normalize gravity
+    const referenceWidth = 400;
+    const { width } = dimensions;
+    const gravityScale = width > 0 ? width / referenceWidth : 1;
+    const scaledGravity = gravity * gravityScale;
+    
+    const engine = Matter.Engine.create({ gravity: { y: scaledGravity } });
+    // Speed up simulation by increasing timeScale (2x faster)
+    engine.timing.timeScale = 2.0;
     const runner = Matter.Runner.create();
     engineRef.current = engine;
     runnerRef.current = runner;
@@ -206,6 +217,11 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
     const initialBall = Matter.Bodies.circle(ballStartX, ballStartY, ballRadius, {
       label: 'ball',
       isStatic: true,
+      collisionFilter: {
+        group: -1, // Negative group means balls don't collide with each other
+        category: 0x0001, // Ball category
+        mask: 0xFFFF, // Collide with everything except other balls (handled by group)
+      },
     });
     Matter.Composite.add(engine.world, initialBall);
     initialBallRef.current = initialBall;
@@ -217,7 +233,7 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
         if (!engineRef.current) return;
         const updatedBalls: Record<string, { x: number; y: number; angle: number }> = {};
         Matter.Composite.allBodies(engineRef.current.world).forEach((body: Matter.Body) => {
-            if (body.label === 'ball') {
+            if (body.label === 'ball' && !settledBallIdsRef.current.has(body.id)) {
                 updatedBalls[body.id] = { x: body.position.x, y: body.position.y, angle: body.angle };
             }
         });
@@ -238,9 +254,18 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
             const handleSettled = (binIndex: number) => {
                 if ((ball as any).isSettled) return;
                 (ball as any).isSettled = true;
-                settledBallRef.current = ball;
+                settledBallsRef.current.add(ball);
+                settledBallIdsRef.current.add(ball.id); // Mark this ball ID as settled
+
+                // Remove settled ball from rendering immediately
+                setBalls(prev => {
+                    const updated = { ...prev };
+                    delete updated[ball.id];
+                    return updated;
+                });
 
                 onGameEnd(binIndex);
+                // Only set winning bin for the most recent ball (optional - could show multiple)
                 if (binIndex !== -1) {
                     setWinningBin(binIndex);
                 }
@@ -264,36 +289,44 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
     };
   }, [boardElements, onGameEnd]);
 
-  // Update gravity dynamically
+  // Update gravity dynamically (scaled to screen size)
   useEffect(() => {
-    if (engineRef.current) {
-      engineRef.current.world.gravity.y = gravity;
+    if (engineRef.current && dimensions.width > 0) {
+      const referenceWidth = 400;
+      const gravityScale = dimensions.width / referenceWidth;
+      const scaledGravity = gravity * gravityScale;
+      engineRef.current.world.gravity.y = scaledGravity;
     }
-  }, [gravity]);
+  }, [gravity, dimensions.width]);
 
   useEffect(() => {
     if (playTrigger > lastPlayTrigger.current) {
         lastPlayTrigger.current = playTrigger;
-
-        if (settledBallRef.current && engineRef.current) {
-            Matter.World.remove(engineRef.current.world, settledBallRef.current);
-            settledBallRef.current = null;
-        }
         
-        // Remove initial static ball if it exists
+        // Remove initial static ball if it exists (only on first play)
         if (initialBallRef.current && engineRef.current) {
             Matter.World.remove(engineRef.current.world, initialBallRef.current);
             initialBallRef.current = null;
         }
         
-        setWinningBin(null);
+        // Don't clear winningBin - allow multiple balls to show their results
+        // setWinningBin(null);
 
         if (engineRef.current && boardElements) {
             const { ballStartX, ballStartY, ballRadius } = boardElements;
             const randomOffset = (Math.random() - 0.5) * ballRadius * 0.1;
             const x = ballStartX + randomOffset;
             const ball = Matter.Bodies.circle(x, ballStartY, ballRadius, {
-                label: 'ball', restitution: 0.6, friction: 0.01, slop: 0.1, density: 0.01,
+                label: 'ball', 
+                restitution: 0.9, 
+                friction: 0.001, 
+                slop: 0.1, 
+                density: 0.01,
+                collisionFilter: {
+                    group: -1, // Negative group means balls don't collide with each other
+                    category: 0x0001, // Ball category
+                    mask: 0xFFFF, // Collide with everything except other balls (handled by group)
+                },
             });
             Matter.Composite.add(engineRef.current.world, ball);
         }
@@ -305,6 +338,11 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
       {boardElements?.pegElements}
       {binElements}
       {Object.keys(balls).map((id) => {
+        const ballId = parseInt(id);
+        // Don't render settled balls
+        if (settledBallIdsRef.current.has(ballId)) {
+          return null;
+        }
         const pos = balls[id];
         return (
           <div key={id} className="absolute rounded-full" style={{

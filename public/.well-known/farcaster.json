@@ -6,7 +6,7 @@
   },
   "miniapp": {
     "version": "1",
-    "name": "Plinky",
+    "name": "PLINKY",
     "iconUrl": "https://compu-plinky.vercel.app/image.png",
     "homeUrl": "https://compu-plinky.vercel.app/",
     "imageUrl": "https://compu-plinky.vercel.app/image.png",
@@ -33,7 +33,7 @@
     ],
     "heroImageUrl": "https://compu-plinky.vercel.app/image.png",
     "tagline": "Plinko-style gambling game",
-    "ogTitle": "Plinky",
+    "ogTitle": "PLINKY",
     "ogDescription": "gambling",
     "ogImageUrl": "https://compu-plinky.vercel.app/image.png"
   },
