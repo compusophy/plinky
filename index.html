@@ -6,6 +6,30 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blinko Game</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      @keyframes fadeUpOut {
+        0% {
+          opacity: 1;
+          transform: translate(-50%, 0) scale(1);
+        }
+        50% {
+          opacity: 1;
+          transform: translate(-50%, -30px) scale(1.1);
+        }
+        100% {
+          opacity: 0;
+          transform: translate(-50%, -60px) scale(0.9);
+        }
+      }
+      ::selection {
+        background-color: #3e9c35;
+        color: #000;
+      }
+      ::-moz-selection {
+        background-color: #3e9c35;
+        color: #000;
+      }
+    </style>
   <script type="importmap">
 {
   "imports": {

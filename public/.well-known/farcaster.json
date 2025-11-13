@@ -1,0 +1,44 @@
+{
+  "accountAssociation": {
+    "header": "eyJmaWQiOjM1MDkxMSwidHlwZSI6ImN1c3RvZHkiLCJrZXkiOiIweDJGREVmM0Y0NzBlQ2QyQmM5YTk3NzU2OEM0M0FEMzg2MGMxNjExRDgifQ",
+    "payload": "eyJkb21haW4iOiJjb21wdS1wbGlua3kudmVyY2VsLmFwcCJ9",
+    "signature": "JXy3Wd4JMS6JYb9KyyV7bOYJQxngL+GQSIGwQs6Bs+12rmeUKccLmspjE9q2Iu+lvA56VR2Ko/cblg/Yv/45kRw="
+  },
+  "miniapp": {
+    "version": "1",
+    "name": "Plinky",
+    "iconUrl": "https://compu-plinky.vercel.app/image.png",
+    "homeUrl": "https://compu-plinky.vercel.app/",
+    "imageUrl": "https://compu-plinky.vercel.app/image.png",
+    "buttonTitle": "Open App",
+    "splashImageUrl": "https://compu-plinky.vercel.app/image.png",
+    "splashBackgroundColor": "#ffffff",
+    "requiredChains": [
+      "eip155:8453"
+    ],
+    "requiredCapabilities": [
+      "wallet.getEthereumProvider",
+      "actions.ready"
+    ],
+    "subtitle": "Plinko-style gambling game",
+    "description": "gambling",
+
+    "primaryCategory": "social",
+    "tags": [
+      "gaming",
+      "gambling",
+      "plinko",
+      "casino",
+      "defi"
+    ],
+    "heroImageUrl": "https://compu-plinky.vercel.app/image.png",
+    "tagline": "Plinko-style gambling game",
+    "ogTitle": "Plinky",
+    "ogDescription": "gambling",
+    "ogImageUrl": "https://compu-plinky.vercel.app/image.png"
+  },
+  "baseBuilder": {
+    "ownerAddress": "0x95F2a3aB6B8ac496e12EF2fE0F6b406e870cD4CD"
+  }
+}
+

@@ -1,18 +1,8 @@
-import { RiskLevel } from './types';
-
 export const ROWS = 7;
 
-export const BASE_MULTIPLIERS: Record<RiskLevel, number[]> = {
-  [RiskLevel.Low]: [
-    5, 2, 1.1, 0.8, 0.8, 1.1, 2, 5
-  ],
-  [RiskLevel.Medium]: [
-    7, 4, 2, 1.1, 1.1, 2, 4, 7
-  ],
-  [RiskLevel.High]: [
-    77, 17, 7, 1.7, 1.7, 7, 17, 77
-  ],
-};
+export const MULTIPLIERS = [
+  3.7, 2.1, 1.05, 0.58, 0.58, 1.05, 2.1, 3.7
+];
 
 export const MULTIPLIER_COLORS: { [key: number]: string } = {
   0.9: 'bg-purple-500',

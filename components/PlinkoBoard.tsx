@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import Matter from 'matter-js';
-import { ROWS, getMultiplierColor } from '../constants';
+import { ROWS } from '../constants';
 
 interface PlinkoBoardProps {
   multipliers: number[];
   playTrigger: number;
   onGameEnd: (binIndex: number) => void;
+  gravity: number;
 }
 
 type BinData = {
@@ -13,6 +14,7 @@ type BinData = {
     left: number;
     width: number;
     height: number;
+    bottom: number;
 };
 
 type BoardElements = {
@@ -24,12 +26,13 @@ type BoardElements = {
     ballStartY: number;
 };
 
-const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onGameEnd }) => {
+const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onGameEnd, gravity }) => {
   const sceneRef = useRef<HTMLDivElement>(null);
-  const engineRef = useRef<Matter.Engine>();
-  const runnerRef = useRef<Matter.Runner>();
+  const engineRef = useRef<Matter.Engine | undefined>(undefined);
+  const runnerRef = useRef<Matter.Runner | undefined>(undefined);
   const lastPlayTrigger = useRef(playTrigger);
   const settledBallRef = useRef<Matter.Body | null>(null);
+  const initialBallRef = useRef<Matter.Body | null>(null);
   
   const [balls, setBalls] = useState<Record<string, { x: number; y: number; angle: number }>>({});
   const [winningBin, setWinningBin] = useState<number | null>(null);
@@ -58,14 +61,30 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
     const ballRadius = Math.max(3, width * 0.02);
     const pegRadius = Math.max(1.5, width * 0.01);
     
-    const ballStartX = width / 2;
-    const ballStartY = ballRadius * 2;
-    
     const hSpacing = width / (binCount);
-    const pegGridStartY = ballStartY + ballRadius * 3;
-    const pegAreaBottom = height - hSpacing;
-    const pegAreaHeight = pegAreaBottom - pegGridStartY;
-    const vSpacing = pegAreaHeight / pegRows;
+    
+    // Calculate uniform spacing: space above ball = spacing between rows
+    // Container has header (vSpacing) + main + footer (vSpacing)
+    // Main has: space above ball + ball-to-row0 + (pegRows-1) spacings + space after last peg + space to bins
+    // Total spacings in main = 1 (above ball) + 1 (ball to row0) + (pegRows-1) + 1 (after last peg) + 1 (to bins) = pegRows + 3
+    const bottomPadding = hSpacing; // Space for bins
+    const totalSpacings = pegRows + 3; // Above ball + between rows + after last peg + to bins
+    const vSpacing = (height - bottomPadding) / totalSpacings;
+    
+    // Position ball: space from top to ball center = vSpacing
+    const ballStartX = width / 2;
+    const ballStartY = vSpacing; // Ball center is vSpacing from top
+    
+    // First row of pegs starts one spacing below the ball center
+    const pegGridStartY = ballStartY + vSpacing;
+    
+    // Calculate where bins start (completely below last row of pegs)
+    // Last row of pegs is at: pegGridStartY + (pegRows - 1) * vSpacing
+    // Add full spacing below it to ensure bins are completely under
+    const lastPegRowY = pegGridStartY + (pegRows - 1) * vSpacing;
+    const pegAreaBottom = lastPegRowY + vSpacing;
+    
+    const ballStartYAdjusted = ballStartY;
 
     const staticBodies: Matter.Body[] = [];
     const pegElements: React.ReactElement[] = [];
@@ -87,7 +106,7 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
     }
 
     const binDividerTopY = pegAreaBottom;
-    const binWallHeight = hSpacing;
+    const binWallHeight = vSpacing; // Match row height for uniform spacing
     const binBottomY = binDividerTopY + binWallHeight;
     
     const floor = Matter.Bodies.rectangle(width / 2, binBottomY + ballRadius * 2, width * 3, 4, { isStatic: true, label: 'floor' });
@@ -106,6 +125,7 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
     for (let i = 0; i < binCount; i++) {
         const sensorX = i * hSpacing + hSpacing / 2;
         const sensorHeight = binWallHeight;
+        // Sensor top should align with binDividerTopY (center of divider nodes), so center is at binDividerTopY + sensorHeight/2
         const sensorY = binDividerTopY + sensorHeight / 2;
         const sensor = Matter.Bodies.rectangle(sensorX, sensorY, hSpacing, sensorHeight, { isStatic: true, isSensor: true, label: `bin-${i}` });
         staticBodies.push(sensor);
@@ -117,31 +137,52 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
         const binFloorBody = Matter.Bodies.rectangle(binFloorX, binFloorY, binFloorWidth, binFloorHeight, { isStatic: true, label: 'bin-floor' });
         staticBodies.push(binFloorBody);
 
+        // Calculate bottom offset: bins should start at binDividerTopY (center of divider nodes) and extend downward
+        // The top of the bin should be at binDividerTopY, so bottom = height - binDividerTopY - binWallHeight
+        const binBottomOffset = height - binDividerTopY - binWallHeight;
+        
         binData.push({
             multiplier: multipliers[i],
             left: (i * 100) / binCount,
             width: 100 / binCount,
-            height: binWallHeight
+            height: binWallHeight,
+            bottom: binBottomOffset
         });
     }
 
-    setBoardElements({ staticBodies, pegElements, binData, ballRadius, ballStartX, ballStartY });
+    setBoardElements({ staticBodies, pegElements, binData, ballRadius, ballStartX, ballStartY: ballStartYAdjusted });
   }, [dimensions, multipliers]);
 
   const binElements = useMemo(() => {
       if (!boardElements) return [];
-      return boardElements.binData.map((data, i) => {
+      
+      // Rainbow colors mirror-symmetrical: purple at edges, red in middle (semi-transparent)
+      const rainbowColors = [
+        'bg-purple-500/30',   // Bin 0 - Purple (outer left)
+        'bg-indigo-500/30',   // Bin 1 - Indigo
+        'bg-blue-500/30',     // Bin 2 - Blue
+        'bg-red-500/30',      // Bin 3 - Red (middle left)
+        'bg-red-500/30',      // Bin 4 - Red (middle right)
+        'bg-blue-500/30',     // Bin 5 - Blue
+        'bg-indigo-500/30',   // Bin 6 - Indigo
+        'bg-purple-500/30',   // Bin 7 - Purple (outer right)
+      ];
+      
+      return boardElements.binData.map((data: BinData, i: number) => {
         const multiplier = data.multiplier;
-        const colorClass = getMultiplierColor(multiplier);
-        const borderColorClass = colorClass.replace('bg-', 'border-');
-        const shadowColorClass = colorClass.replace('bg-', 'shadow-');
+        const colorClass = rainbowColors[i] || 'bg-gray-500/30';
+        // Extract base color for border and shadow (remove opacity and bg- prefix)
+        const baseColor = colorClass.replace('bg-', '').replace('/30', '');
+        const borderColorClass = `border-${baseColor}`;
+        const shadowColorClass = `shadow-${baseColor}`;
         const isWinning = winningBin === i;
         
-        const highlightClass = isWinning ? `${colorClass.replace('500', '500/20')} shadow-[0_0_15px] ${shadowColorClass}` : 'bg-transparent';
-        const binClasses = `w-full h-full rounded-b-md flex items-center justify-center text-white font-bold text-xs md:text-sm transition-all duration-300 border-2 ${borderColorClass} ${highlightClass}`;
+        // No background, only add glow when winning
+        const glowClass = isWinning ? `shadow-[0_0_15px] ${shadowColorClass}` : '';
+        const binClasses = `w-full h-full flex items-center justify-center text-white font-bold text-xs md:text-sm transition-all duration-300 border-l border-r border-b border-t-0 bg-transparent ${borderColorClass} ${glowClass}`;
         
         return (
-            <div key={`b-${i}`} className="absolute bottom-0 flex items-center justify-center" style={{ left: `${data.left}%`, width: `${data.width}%`, height: data.height }}>
+            <div key={`b-${i}`} className="absolute flex items-center justify-center" style={{ left: `${data.left}%`, width: `${data.width}%`, bottom: `${data.bottom}px`, height: `${data.height}px` }}>
                 <div className={binClasses}>
                     {multiplier.toFixed(2)}x
                 </div>
@@ -151,7 +192,7 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
   }, [boardElements, winningBin, multipliers]);
 
   useEffect(() => {
-    const engine = Matter.Engine.create({ gravity: { y: 0.25 } });
+    const engine = Matter.Engine.create({ gravity: { y: gravity } });
     const runner = Matter.Runner.create();
     engineRef.current = engine;
     runnerRef.current = runner;
@@ -159,13 +200,23 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
     if (!boardElements) return;
 
     Matter.Composite.add(engine.world, boardElements.staticBodies);
+    
+    // Create initial static ball at starting position
+    const { ballStartX, ballStartY, ballRadius } = boardElements;
+    const initialBall = Matter.Bodies.circle(ballStartX, ballStartY, ballRadius, {
+      label: 'ball',
+      isStatic: true,
+    });
+    Matter.Composite.add(engine.world, initialBall);
+    initialBallRef.current = initialBall;
+    
     Matter.Runner.run(runner, engine);
 
     let animationFrameId: number;
     const update = () => {
         if (!engineRef.current) return;
         const updatedBalls: Record<string, { x: number; y: number; angle: number }> = {};
-        Matter.Composite.allBodies(engineRef.current.world).forEach(body => {
+        Matter.Composite.allBodies(engineRef.current.world).forEach((body: Matter.Body) => {
             if (body.label === 'ball') {
                 updatedBalls[body.id] = { x: body.position.x, y: body.position.y, angle: body.angle };
             }
@@ -213,6 +264,13 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
     };
   }, [boardElements, onGameEnd]);
 
+  // Update gravity dynamically
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.world.gravity.y = gravity;
+    }
+  }, [gravity]);
+
   useEffect(() => {
     if (playTrigger > lastPlayTrigger.current) {
         lastPlayTrigger.current = playTrigger;
@@ -221,6 +279,13 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
             Matter.World.remove(engineRef.current.world, settledBallRef.current);
             settledBallRef.current = null;
         }
+        
+        // Remove initial static ball if it exists
+        if (initialBallRef.current && engineRef.current) {
+            Matter.World.remove(engineRef.current.world, initialBallRef.current);
+            initialBallRef.current = null;
+        }
+        
         setWinningBin(null);
 
         if (engineRef.current && boardElements) {
@@ -243,8 +308,8 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
         const pos = balls[id];
         return (
           <div key={id} className="absolute rounded-full" style={{
-              background: 'radial-gradient(circle at 30% 30%, #d1faf0, #14b8a6, #0f766e)',
-              boxShadow: '0 0 5px #14b8a6, 0 0 10px #14b8a6',
+              background: 'radial-gradient(circle at 30% 30%, #3e9c35, #168118, #157811)',
+              boxShadow: '0 0 5px #168118, 0 0 10px #168118',
               width: boardElements ? boardElements.ballRadius * 2 : 0,
               height: boardElements ? boardElements.ballRadius * 2 : 0,
               left: pos.x,
