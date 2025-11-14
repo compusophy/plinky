@@ -17,6 +17,9 @@ dependencies:
   '@wagmi/core':
     specifier: ^2.22.1
     version: 2.22.1(@types/react@19.2.4)(react@19.2.0)(typescript@5.8.3)(use-sync-external-store@1.4.0)(viem@2.39.0)
+  lucide-react:
+    specifier: ^0.553.0
+    version: 0.553.0(react@19.2.0)
   matter-js:
     specifier: 0.19.0
     version: 0.19.0
@@ -4703,6 +4706,14 @@ packages:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
     dependencies:
       yallist: 3.1.1
+
+  /lucide-react@0.553.0(react@19.2.0):
+    resolution: {integrity: sha512-BRgX5zrWmNy/lkVAe0dXBgd7XQdZ3HTf+Hwe3c9WK6dqgnj9h+hxV+MDncM88xDWlCq27+TKvHGE70ViODNILw==}
+    peerDependencies:
+      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
+    dependencies:
+      react: 19.2.0
+    dev: false
 
   /math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
