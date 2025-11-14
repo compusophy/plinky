@@ -7,6 +7,7 @@ interface PlinkoBoardProps {
   playTrigger: number;
   onGameEnd: (binIndex: number) => void;
   gravity: number;
+  onPegHit?: () => void;
 }
 
 type BinData = {
@@ -26,7 +27,7 @@ type BoardElements = {
     ballStartY: number;
 };
 
-const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onGameEnd, gravity }) => {
+const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onGameEnd, gravity, onPegHit }) => {
   const sceneRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<Matter.Engine | undefined>(undefined);
   const runnerRef = useRef<Matter.Runner | undefined>(undefined);
@@ -193,15 +194,25 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
   }, [boardElements, winningBin, multipliers]);
 
   useEffect(() => {
-    // Scale gravity based on screen dimensions to maintain consistent physics
-    // Gravity needs to scale with screen size because distances scale with screen size
-    // Use a reference width (e.g., 400px) to normalize gravity
-    const referenceWidth = 400;
-    const { width } = dimensions;
-    const gravityScale = width > 0 ? width / referenceWidth : 1;
-    const scaledGravity = gravity * gravityScale;
+    // Normalize physics to maintain consistent behavior across all screen sizes
+    // Physics must scale proportionally with board dimensions to maintain consistent behavior
+    // Since board uses both width (hSpacing) and height (vSpacing), we scale based on both
+    const { width, height } = dimensions;
     
-    const engine = Matter.Engine.create({ gravity: { y: scaledGravity } });
+    // Calculate physics scale based on board dimensions
+    // Use average of width and height scale factors to account for both dimensions
+    // This ensures physics scales proportionally with board size regardless of aspect ratio
+    const referenceWidth = 400;
+    const referenceHeight = 600; // Approximate reference height
+    const widthScale = width > 0 ? width / referenceWidth : 1;
+    const heightScale = height > 0 ? height / referenceHeight : 1;
+    // Average scale factor accounts for both horizontal and vertical scaling
+    const physicsScale = (widthScale + heightScale) / 2;
+    
+    // Apply physics scale to gravity to maintain consistent physics behavior
+    const normalizedGravity = gravity * physicsScale;
+    
+    const engine = Matter.Engine.create({ gravity: { y: normalizedGravity } });
     // Speed up simulation by increasing timeScale (2x faster)
     engine.timing.timeScale = 2.0;
     const runner = Matter.Runner.create();
@@ -248,6 +259,12 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
             const ball = bodyA.label === 'ball' ? bodyA : (bodyB.label === 'ball' ? bodyB : null);
             if (!ball || (ball as any).isSettled) continue;
 
+            // Check for peg collision (ball hitting peg)
+            const peg = bodyA.label === 'peg' ? bodyA : (bodyB.label === 'peg' ? bodyB : null);
+            if (peg && onPegHit) {
+                onPegHit();
+            }
+
             const binSensor = bodyA.label.startsWith('bin-') ? bodyA : (bodyB.label.startsWith('bin-') ? bodyB : null);
             const floor = bodyA.label === 'floor' ? bodyA : (bodyB.label === 'floor' ? bodyB : null);
 
@@ -289,15 +306,20 @@ const PlinkoBoard: React.FC<PlinkoBoardProps> = ({ multipliers, playTrigger, onG
     };
   }, [boardElements, onGameEnd]);
 
-  // Update gravity dynamically (scaled to screen size)
+  // Update gravity dynamically (normalized to maintain consistent physics)
   useEffect(() => {
-    if (engineRef.current && dimensions.width > 0) {
+    if (engineRef.current && dimensions.width > 0 && dimensions.height > 0) {
+      // Use the same physics normalization as engine creation
       const referenceWidth = 400;
-      const gravityScale = dimensions.width / referenceWidth;
-      const scaledGravity = gravity * gravityScale;
-      engineRef.current.world.gravity.y = scaledGravity;
+      const referenceHeight = 600; // Approximate reference height
+      const widthScale = dimensions.width / referenceWidth;
+      const heightScale = dimensions.height / referenceHeight;
+      // Average scale factor accounts for both horizontal and vertical scaling
+      const physicsScale = (widthScale + heightScale) / 2;
+      const normalizedGravity = gravity * physicsScale;
+      engineRef.current.world.gravity.y = normalizedGravity;
     }
-  }, [gravity, dimensions.width]);
+  }, [gravity, dimensions.width, dimensions.height]);
 
   useEffect(() => {
     if (playTrigger > lastPlayTrigger.current) {

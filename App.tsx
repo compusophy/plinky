@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { sdk } from '@farcaster/miniapp-sdk';
+import { Volume2, VolumeX } from 'lucide-react';
 import PlinkoBoard from './components/PlinkoBoard';
 import HistoryTable from './components/HistoryTable';
 import { GameResult } from './types';
@@ -24,6 +25,8 @@ const App: React.FC = () => {
   const [targetRTP, setTargetRTP] = useState(0.95);
   const [isCalculating, setIsCalculating] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [rowSpacing, setRowSpacing] = useState<number>(0);
@@ -96,6 +99,63 @@ const App: React.FC = () => {
       console.debug('Failed to call sdk.ready():', error);
     });
   }, []);
+
+  // Initialize audio context for sound effects
+  useEffect(() => {
+    // Create audio context on user interaction (required by browsers)
+    const initAudio = () => {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+    };
+    
+    // Initialize on first user interaction
+    const handleInteraction = () => {
+      initAudio();
+      document.removeEventListener('click', handleInteraction);
+      document.removeEventListener('touchstart', handleInteraction);
+    };
+    
+    document.addEventListener('click', handleInteraction);
+    document.addEventListener('touchstart', handleInteraction);
+    
+    return () => {
+      document.removeEventListener('click', handleInteraction);
+      document.removeEventListener('touchstart', handleInteraction);
+    };
+  }, []);
+
+  // Play peg hit sound
+  const playPegSound = useCallback(() => {
+    if (!soundEnabled || !audioContextRef.current) return;
+    
+    try {
+      const audioContext = audioContextRef.current;
+      // Resume audio context if suspended (required by some browsers)
+      if (audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+      
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      // Simple tone: 800Hz, short duration
+      oscillator.frequency.value = 800;
+      oscillator.type = 'sine';
+      
+      gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.1);
+    } catch (error) {
+      // Silently fail if audio context is not available
+      console.debug('Failed to play sound:', error);
+    }
+  }, [soundEnabled]);
 
   // Initialize bin distribution tracking (only on mount, never reset)
   useEffect(() => {
@@ -561,9 +621,16 @@ const App: React.FC = () => {
         )}
         
         <header 
-          className="absolute top-0 left-0 right-0 px-4 flex justify-end items-center z-20"
+          className="absolute top-0 left-0 right-0 px-4 flex justify-between items-center z-20"
           style={{ height: rowSpacing || 'auto', paddingTop: rowSpacing ? `${rowSpacing * 0.25}px` : '1rem', paddingBottom: rowSpacing ? `${rowSpacing * 0.25}px` : '1rem' }}
         >
+          <button 
+            onClick={() => setSoundEnabled(!soundEnabled)} 
+            className="w-8 h-8 flex items-center justify-center bg-gray-700/50 hover:bg-gray-700/80 text-white rounded transition-colors"
+            aria-label={soundEnabled ? 'Mute sound' : 'Unmute sound'}
+          >
+            {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+          </button>
           <button onClick={() => setIsDevToolsVisible(true)} className="bg-purple-700/50 hover:bg-purple-700/80 text-white font-semibold py-1 px-2 rounded-lg text-xs transition-colors">
             Dev Tools
           </button>
@@ -575,6 +642,7 @@ const App: React.FC = () => {
               playTrigger={playTrigger}
               onGameEnd={handleGameEnd}
               gravity={gravity}
+              onPegHit={playPegSound}
           />
         </main>
         
